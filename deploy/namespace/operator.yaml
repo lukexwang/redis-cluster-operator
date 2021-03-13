@@ -22,7 +22,7 @@ spec:
           args:
             - --rename-command-path=/etc/redisconf
             - --rename-command-file=redis.conf
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           env:
             - name: WATCH_NAMESPACE
               valueFrom:

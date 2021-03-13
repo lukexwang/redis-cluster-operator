@@ -100,6 +100,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 		return err
 	}
 
+	//如果某些事件 DistributedRedisCluster 不需要处理,就return false
 	pred := predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			// returns false if DistributedRedisCluster is ignored (not managed) by this operator.
@@ -135,6 +136,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	}
 
 	// Watch for changes to primary resource DistributedRedisCluster
+	// 监听primary resource DistributedRedisCluster的变化
 	err = c.Watch(&source.Kind{Type: &redisv1alpha1.DistributedRedisCluster{}}, &handler.EnqueueRequestForObject{}, pred)
 	if err != nil {
 		return err
