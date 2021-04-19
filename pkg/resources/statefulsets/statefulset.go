@@ -32,10 +32,12 @@ const (
 )
 
 // NewStatefulSetForCR creates a new StatefulSet for the given Cluster.
+// 为给定cluster生成stateFulSet(的定义)
 func NewStatefulSetForCR(cluster *redisv1alpha1.DistributedRedisCluster, ssName, svcName string,
 	labels map[string]string) (*appsv1.StatefulSet, error) {
-	password := redisPassword(cluster)
-	volumes := redisVolumes(cluster)
+	password := redisPassword(cluster) //给定cluster的password定义
+	//redisVolumes 确定stateFulSet的volumes, 包含conf(configmap类型)、dataVolume、备份的volume等
+	volumes := redisVolumes(cluster) //redisVolumes 确定stateFulSet的volumes, 包含conf(configmap类型)、dataVolume、备份的volume等
 	namespace := cluster.Namespace
 	spec := cluster.Spec
 	size := spec.ClusterReplicas + 1
@@ -50,7 +52,7 @@ func NewStatefulSetForCR(cluster *redisv1alpha1.DistributedRedisCluster, ssName,
 			ServiceName: svcName,
 			Replicas:    &size,
 			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
-				Type: appsv1.RollingUpdateStatefulSetStrategyType,
+				Type: appsv1.RollingUpdateStatefulSetStrategyType, // RollingUpdate
 			},
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
@@ -61,7 +63,7 @@ func NewStatefulSetForCR(cluster *redisv1alpha1.DistributedRedisCluster, ssName,
 					Annotations: cluster.Spec.Annotations,
 				},
 				Spec: corev1.PodSpec{
-					ImagePullSecrets: cluster.Spec.ImagePullSecrets,
+					ImagePullSecrets: cluster.Spec.ImagePullSecrets, //如果拉取镜像需要密码,则这里设置
 					Affinity:         getAffinity(cluster, labels),
 					Tolerations:      spec.ToleRations,
 					SecurityContext:  spec.SecurityContext,
@@ -75,8 +77,11 @@ func NewStatefulSetForCR(cluster *redisv1alpha1.DistributedRedisCluster, ssName,
 		},
 	}
 
+	// 如果cluster声明的是pvc,则将pvc信息加入到 stateFulSet.Spec.VolumeClaimTemplates中
+	// clustere.spec.Storate.Type == "persistent-claim"
 	if spec.Storage != nil && spec.Storage.Type == redisv1alpha1.PersistentClaim {
 		ss.Spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{
+			//从cluster的spec.storage中获取 pvc的相关声明(如accessMpde、storaageClassName等)
 			persistentClaim(cluster, labels),
 		}
 		if spec.Storage.DeleteClaim {
@@ -85,9 +90,12 @@ func NewStatefulSetForCR(cluster *redisv1alpha1.DistributedRedisCluster, ssName,
 		}
 	}
 	if spec.Monitor != nil {
+		//redisExporterContainer 返回redis exporter container的定义
 		ss.Spec.Template.Spec.Containers = append(ss.Spec.Template.Spec.Containers, redisExporterContainer(cluster, password))
 	}
+	//需要从备份中恢复数据
 	if cluster.IsRestoreFromBackup() && cluster.IsRestoreRunning() && cluster.Status.Restore.Backup != nil {
+		//redisInitContainer 主要作用是在init Container中根据备份恢复数据
 		initContainer, err := redisInitContainer(cluster, password)
 		if err != nil {
 			return nil, err
@@ -146,30 +154,33 @@ func getAffinity(cluster *redisv1alpha1.DistributedRedisCluster, labels map[stri
 	}
 }
 
+//persistentClaim 从cluster的spec.storage中获取 pvc的相关声明(如accessMpde、storaageClassName等)
 func persistentClaim(cluster *redisv1alpha1.DistributedRedisCluster, labels map[string]string) corev1.PersistentVolumeClaim {
 	mode := corev1.PersistentVolumeFilesystem
 	return corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   redisStorageVolumeName,
+			Name:   redisStorageVolumeName, //redis-data
 			Labels: labels,
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, // ["ReadWriteOnce"]
 			Resources: corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{
 					corev1.ResourceStorage: cluster.Spec.Storage.Size,
 				},
 			},
 			StorageClassName: &cluster.Spec.Storage.Class,
-			VolumeMode:       &mode,
+			VolumeMode:       &mode, //Filesystem
 		},
 	}
 }
 
+//ClusterStatefulSetName 集群statefulSet设置名字: drc-${cluster_name}-${N}
 func ClusterStatefulSetName(clusterName string, i int) string {
 	return fmt.Sprintf("drc-%s-%d", clusterName, i)
 }
 
+//ClusterHeadlessSvcName 集群每个stateFulSet都对应一个headlessSvc,名称:${serviceName}-${N}
 func ClusterHeadlessSvcName(name string, i int) string {
 	return fmt.Sprintf("%s-%d", name, i)
 }
@@ -225,6 +236,7 @@ func mergeRenameCmds(userCmds []string, systemRenameCmdMap map[string]string) []
 	return cmds
 }
 
+//redisServerContainer 生成redis server container的定义
 func redisServerContainer(cluster *redisv1alpha1.DistributedRedisCluster, password *corev1.EnvVar) corev1.Container {
 	probeArg := "redis-cli -h $(hostname) ping"
 
@@ -308,6 +320,7 @@ func redisServerContainer(cluster *redisv1alpha1.DistributedRedisCluster, passwo
 	return container
 }
 
+//redisExporterContainer 返回redis exporter container的定义
 func redisExporterContainer(cluster *redisv1alpha1.DistributedRedisCluster, password *corev1.EnvVar) corev1.Container {
 	container := corev1.Container{
 		Name: ExporterContainerName,
@@ -337,6 +350,7 @@ func redisExporterContainer(cluster *redisv1alpha1.DistributedRedisCluster, pass
 	return container
 }
 
+//redisInitContainer init Container,主要作用是在init Container中根据备份恢复数据
 func redisInitContainer(cluster *redisv1alpha1.DistributedRedisCluster, password *corev1.EnvVar) (corev1.Container, error) {
 	backup := cluster.Status.Restore.Backup
 	backupSpec := backup.Spec.Backend
@@ -458,15 +472,16 @@ func redisPassword(cluster *redisv1alpha1.DistributedRedisCluster) *corev1.EnvVa
 	}
 }
 
+//redisVolumes 确定stateFulSet的volumes, 包含conf(configmap类型)、dataVolume、备份的volume等
 func redisVolumes(cluster *redisv1alpha1.DistributedRedisCluster) []corev1.Volume {
 	executeMode := int32(0755)
 	volumes := []corev1.Volume{
 		{
-			Name: configMapVolumeName,
+			Name: configMapVolumeName, // conf, 保存fix-ip.sh、redis.conf、shutdown.sh等
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
 					LocalObjectReference: corev1.LocalObjectReference{
-						Name: configmaps.RedisConfigMapName(cluster.Name),
+						Name: configmaps.RedisConfigMapName(cluster.Name), // 集群conifgmap名就是 redis-cluster-${cluster_name}
 					},
 					DefaultMode: &executeMode,
 				},
@@ -474,26 +489,34 @@ func redisVolumes(cluster *redisv1alpha1.DistributedRedisCluster) []corev1.Volum
 		},
 	}
 
+	//redisDataVolume 该函数会去找到 user 期望的volume
+	//- 如果没有定义 cluster.Spec,则返回 emptyVolume;
+	//- 如果 cluster.spec.storate.Type== ephemeral,则返回 emptyVolume;
+	//- 如果 cluster.spec.storate.Type== persistent-claim,则返回 nil;
+	//- 否则都返回 emptyVolume
 	dataVolume := redisDataVolume(cluster)
 	if dataVolume != nil {
 		volumes = append(volumes, *dataVolume)
 	}
 
+	//如果不需要在备份中恢复数据、也没用正在从备份中恢复数据 则直接返回volumes
 	if !cluster.IsRestoreFromBackup() ||
 		cluster.Status.Restore.Backup == nil ||
 		!cluster.IsRestoreRunning() {
 		return volumes
 	}
 
+	//需要从备份中恢复数据
 	volumes = append(volumes, corev1.Volume{
 		Name: "rcloneconfig",
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
-				SecretName: cluster.Status.Restore.Backup.RCloneSecretName(),
+				SecretName: cluster.Status.Restore.Backup.RCloneSecretName(), // rcloneconfig-{backupName}
 			},
 		},
 	})
 
+	//IsRefLocalPVC (备份)是否在localPVC中, backup.Spec.Local != nil && backup.Spec.Local.PersistentVolumeClaim!=nil
 	if cluster.Status.Restore.Backup.IsRefLocalPVC() {
 		volumes = append(volumes, corev1.Volume{
 			Name:         redisRestoreLocalVolumeName,
@@ -512,6 +535,12 @@ func emptyVolume() *corev1.Volume {
 		},
 	}
 }
+
+//redisDataVolume 该函数会去找到 user 期望的volume
+//- 如果没有定义 cluster.Spec,则返回 emptyVolume;
+//- 如果 cluster.spec.storate.Type== ephemeral,则返回 emptyVolume;
+//- 如果 cluster.spec.storate.Type== persistent-claim,则返回 nil;
+//- 否则都返回 emptyVolume
 func redisDataVolume(cluster *redisv1alpha1.DistributedRedisCluster) *corev1.Volume {
 	// This will find the volumed desired by the user. If no volume defined
 	// an EmptyDir will be used by default

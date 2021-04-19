@@ -10,6 +10,7 @@ import (
 
 // FixTerminatingPods used to for the deletion of pod blocked in terminating status.
 // in it append the this method will for the deletion of the Pod.
+// FixTerminatingPods 该函数用于 对处于terminating状态,并被阻塞住的 pod的删除;附加此方法用于对pod进行删除
 func (c *CheckAndHeal) FixTerminatingPods(cluster *redisv1alpha1.DistributedRedisCluster, maxDuration time.Duration) (bool, error) {
 	var errs []error
 	var actionDone bool

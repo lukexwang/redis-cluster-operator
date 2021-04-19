@@ -10,8 +10,13 @@ import (
 
 // FixUntrustedNodes used to remove Nodes that are not trusted by other nodes. It can append when a node
 // are removed from the cluster (with the "forget nodes" command) but try to rejoins the cluster.
+// FixUntrustedNodes 用于删除那些 untrusted 的nodes. 一个node被移除cluster(如forget nodes命令),但又尝试join cluster
+// - 处于handshake状态的node,就是untrusted的
+// - 检查podname是否被重用,
+// 		- 如果podName没被重用,则直接删除该Pod,然后继续forget Pod;
+// 		- 如果podName被重用了,则直接删除该Pod;
 func (c *CheckAndHeal) FixUntrustedNodes(cluster *redisv1alpha1.DistributedRedisCluster, infos *redisutil.ClusterInfos, admin redisutil.IAdmin) (bool, error) {
-	untrustedNode := listUntrustedNodes(infos)
+	untrustedNode := listUntrustedNodes(infos) //处于handshake状态的node,就是untrusted的
 	var errs []error
 	doneAnAction := false
 
@@ -31,15 +36,18 @@ func (c *CheckAndHeal) FixUntrustedNodes(cluster *redisv1alpha1.DistributedRedis
 		}
 		if len(node2) > 0 {
 			// it means the POD is used by another Redis node ID so we should not delete the pod.
+			// 如果 uNode 确实在 Infos.GetNodes()中,那么代表他确实是我们cluster需要的redis节点
 			continue
 		}
-		exist, reused := checkIfPodNameExistAndIsReused(uNode, c.Pods)
-		if exist && !reused {
+		//检查podname是否被重用
+		exist, reused := checkIfPodNameExistAndIsReused(uNode, c.Pods) //ctx.pods 中保存 cluster处于running状态的Pods
+		if exist && !reused {                                          // 如果podName没被重用,则直接删除该Pod,然后继续forget Pod;
 			c.Logger.Info("[FixUntrustedNodes] try to delete pod", "podName", uNode.PodName)
 			if err := c.PodControl.DeletePodByName(cluster.Namespace, uNode.PodName); err != nil {
 				errs = append(errs, err)
 			}
 		}
+		//如果podName被重用了,则直接删除该Pod;
 		doneAnAction = true
 		if !c.DryRun {
 			c.Logger.Info("[FixUntrustedNodes] try to forget node", "nodeId", id)
@@ -59,7 +67,7 @@ func listUntrustedNodes(infos *redisutil.ClusterInfos) map[string]*redisutil.Nod
 	}
 	for _, nodeinfos := range infos.Infos {
 		for _, node := range nodeinfos.Friends {
-			if node.HasStatus(redisutil.NodeStatusHandshake) {
+			if node.HasStatus(redisutil.NodeStatusHandshake) { //处于handshake状态的node,就是untrusted的
 				if _, found := untrustedNodes[node.ID]; !found {
 					untrustedNodes[node.ID] = node
 				}
@@ -69,6 +77,7 @@ func listUntrustedNodes(infos *redisutil.ClusterInfos) map[string]*redisutil.Nod
 	return untrustedNodes
 }
 
+//checkIfPodNameExistAndIsReused 检查podname是否被重用
 func checkIfPodNameExistAndIsReused(node *redisutil.Node, podlist []*corev1.Pod) (exist bool, reused bool) {
 	if node.PodName == "" {
 		return

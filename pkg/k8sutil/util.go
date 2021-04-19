@@ -11,6 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+//IsRequestRetryable 是否是可重试的请求
 func IsRequestRetryable(err error) bool {
 	return kerr.IsServiceUnavailable(err) ||
 		kerr.IsTimeout(err) ||

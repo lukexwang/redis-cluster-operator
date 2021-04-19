@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -53,9 +54,12 @@ func DispatchMasters(cluster *redisutil.Cluster, nodes redisutil.Nodes, nbMaster
 }
 
 // DispatchSlotToNewMasters used to dispatch Slot to the new master nodes
+//- 以缩容的角度来看,newMasterNodes 保存的是(缩容后保留的)的stateFulSet 对应的master. newMasterNodes 应该换个名称 expectedMasterNodes
+//- curMasterNodes 保存的是当前集群中所有(负责slot的)master, currentMasterNodes 应该换个名称 currentSlotMasterNodes
+//- 获取缩容的 slot搬迁计划,执行slot搬迁;
 func (c *Ctx) DispatchSlotToNewMasters(admin redisutil.IAdmin, newMasterNodes, currentMasterNodes, allMasterNodes redisutil.Nodes) error {
 	// Calculate the Migration slot information (which slots goes from where to where)
-	migrationSlotInfo, info := c.feedMigInfo(newMasterNodes, currentMasterNodes, allMasterNodes, int(admin.GetHashMaxSlot()+1))
+	migrationSlotInfo, info := c.feedMigInfo(newMasterNodes, currentMasterNodes, allMasterNodes, int(admin.GetHashMaxSlot()+1)) //admin.GetHashMaxSlot+1 ==> 16384
 	c.cluster.ActionsInfo = info
 	c.cluster.Status = redisv1alpha1.ClusterStatusRebalancing
 	for nodesInfo, slots := range migrationSlotInfo {
@@ -128,8 +132,20 @@ func (c *Ctx) DispatchSlotToNewMasters(admin redisutil.IAdmin, newMasterNodes, c
 	return nil
 }
 
+//feedMigInfo 生成迁移计划,最后的返回结果中:
+// mapOut: 保存迁移计划,key中包含 from、to,value中是需要迁移的slot列表
 func (c *Ctx) feedMigInfo(newMasterNodes, oldMasterNodes, allMasterNodes redisutil.Nodes, nbSlots int) (mapOut mapSlotByMigInfo, info redisutil.ClusterActionsInfo) {
-	mapOut = make(mapSlotByMigInfo)
+	mapOut = make(mapSlotByMigInfo) //保存迁移计划,key中包含 from、to,value中是需要迁移的slot
+	/*
+		mapSlotToUpdate
+		每个节点需要 迁移入(importing) 这些slot
+		slotToAddBymaster => {
+		  "master01"=>[10924..12288],
+		  "master02"=>[12289..13653],
+		  "master03"=>[13654,13655..15018],
+		  "master04"=>[15019..16383]
+		}
+	*/
 	mapSlotToUpdate := c.buildSlotsByNode(newMasterNodes, oldMasterNodes, allMasterNodes, nbSlots)
 
 	for id, slots := range mapSlotToUpdate {
@@ -137,13 +153,13 @@ func (c *Ctx) feedMigInfo(newMasterNodes, oldMasterNodes, allMasterNodes redisut
 			found := false
 			for _, oldNode := range oldMasterNodes {
 				if oldNode.ID == id {
-					if redisutil.Contains(oldNode.Slots, s) {
+					if redisutil.Contains(oldNode.Slots, s) { // slot迁移的目标节点就是 '我',而且'我'现在已经负责该slot了,所以这个slot不用处理了,break
 						found = true
 						break
 					}
-					continue
+					continue // slot迁移的目标节点就是 '我', '我'现在没负责该slot,继续找下一个负责该slot的节点罗,continue
 				}
-				if redisutil.Contains(oldNode.Slots, s) {
+				if redisutil.Contains(oldNode.Slots, s) { //找到了负责该slot的真正节点,那么就可以生成迁移计划
 					newNode, err := newMasterNodes.GetNodeByID(id)
 					if err != nil {
 						c.log.Error(err, "unable to find node", "with id:", id)
@@ -156,13 +172,14 @@ func (c *Ctx) feedMigInfo(newMasterNodes, oldMasterNodes, allMasterNodes redisut
 					break
 				}
 			}
-			if !found {
+			if !found { // 没有找到负责该slot的节点
 				// new slots added (not from an existing master). Correspond to lost slots during important scale down
 				newNode, err := newMasterNodes.GetNodeByID(id)
 				if err != nil {
 					c.log.Error(err, "unable to find node", "with id:", id)
 					continue
 				}
+				// 对于没有节点负责的slot,直接把该slot利用 cluster addslot 方式加入到 newNode 中
 				mapOut[migrationInfo{From: nil, To: newNode}] = append(mapOut[migrationInfo{From: nil, To: newNode}], s)
 
 				// increment slots counter
@@ -175,18 +192,24 @@ func (c *Ctx) feedMigInfo(newMasterNodes, oldMasterNodes, allMasterNodes redisut
 
 // buildSlotsByNode get all slots that have to be migrated with retrieveSlotToMigrateFrom and retrieveSlotToMigrateFromRemovedNodes
 // and assign those slots to node that need them
+// 通过 retrieveSlotToMigrateFrom 和 retrieveSlotToMigrateFromRemovedNodes 获取所有需要迁移的slot
+// 以及将这些slot赋值给 需他们的node
 func (c *Ctx) buildSlotsByNode(newMasterNodes, oldMasterNodes, allMasterNodes redisutil.Nodes, nbSlots int) map[string][]redisutil.Slot {
 	var nbNode = len(newMasterNodes)
 	if nbNode == 0 {
 		return make(map[string][]redisutil.Slot)
 	}
-	nbSlotByNode := int(math.Ceil(float64(nbSlots) / float64(nbNode)))
-	slotToMigrateByNode := c.retrieveSlotToMigrateFrom(oldMasterNodes, nbSlotByNode)
+	nbSlotByNode := int(math.Ceil(float64(nbSlots) / float64(nbNode)))               // 缩容后目标master 每个应该有多少slot
+	slotToMigrateByNode := c.retrieveSlotToMigrateFrom(oldMasterNodes, nbSlotByNode) // 如果某个master上slot过多 大于 nbSlotByNode,生成迁移计划
+	// retrieveSlotToMigrateFromRemovedNodes
+	// - 存在oldMasterNodes中,但不存在 newMasterNodes中的节点就是需要removed的node=>removedNodes;
+	// - 返回需要removed的node 的迁移计划, map[string]slots, key: nodeID, value: slots;
 	slotToMigrateByNodeFromDeleted := c.retrieveSlotToMigrateFromRemovedNodes(newMasterNodes, oldMasterNodes)
 	for id, slots := range slotToMigrateByNodeFromDeleted {
 		slotToMigrateByNode[id] = slots
 	}
 
+	// 找出[0,nbSlots) 之间, 没有任何node负责的slot 有哪些
 	slotToMigrateByNode[""] = c.retrieveLostSlots(oldMasterNodes, nbSlots)
 	if len(slotToMigrateByNode[""]) != 0 {
 		c.log.Error(nil, fmt.Sprintf("several slots have been lost: %v", redisutil.SlotSlice(slotToMigrateByNode[""])))
@@ -195,6 +218,7 @@ func (c *Ctx) buildSlotsByNode(newMasterNodes, oldMasterNodes, allMasterNodes re
 
 	total := 0
 	for _, node := range allMasterNodes {
+		//这里的for循环目的是为了打印下日志
 		currentSlots := 0
 		removedSlots := 0
 		addedSlots := 0
@@ -221,12 +245,13 @@ func (c *Ctx) buildSlotsByNode(newMasterNodes, oldMasterNodes, allMasterNodes re
 }
 
 // retrieveSlotToMigrateFrom list the number of slots that need to be migrated to reach nbSlotByNode per nodes
+// 列出每个node需要迁移到 多少个 slot, 才能达到 负责slot数=nbSlotByNode
 func (c *Ctx) retrieveSlotToMigrateFrom(oldMasterNodes redisutil.Nodes, nbSlotByNode int) map[string][]redisutil.Slot {
 	slotToMigrateByNode := make(map[string][]redisutil.Slot)
 	for _, node := range oldMasterNodes {
 		c.log.V(6).Info("--- oldMasterNode:", "ID:", node.ID)
 		nbSlot := node.TotalSlots()
-		if nbSlot >= nbSlotByNode {
+		if nbSlot >= nbSlotByNode { //当前节点的slot个数大于 nbSlotByNode,则当前节点需要将多余的slot迁走
 			if len(node.Slots[nbSlotByNode:]) > 0 {
 				slotToMigrateByNode[node.ID] = append(slotToMigrateByNode[node.ID], node.Slots[nbSlotByNode:]...)
 			}
@@ -238,12 +263,14 @@ func (c *Ctx) retrieveSlotToMigrateFrom(oldMasterNodes redisutil.Nodes, nbSlotBy
 
 // retrieveSlotToMigrateFromRemovedNodes given the list of node that will be masters with slots, and the list of nodes that were masters with slots
 // return the list of slots from previous nodes that will be moved, because this node will no longer hold slots
+// - 存在oldMasterNodes中,但不存在 newMasterNodes中的节点就是需要removed的node=>removedNodes;
+// - 返回需要removed的node 的迁移计划, map[string]slots, key: nodeID, value: slots;
 func (c *Ctx) retrieveSlotToMigrateFromRemovedNodes(newMasterNodes, oldMasterNodes redisutil.Nodes) map[string][]redisutil.Slot {
 	slotToMigrateByNode := make(map[string][]redisutil.Slot)
 	var removedNodes redisutil.Nodes
 	for _, old := range oldMasterNodes {
 		c.log.V(6).Info("--- oldMasterNode:", old.ID)
-		isPresent := false
+		isPresent := false //存在oldMasterNodes中,但不存在 newMasterNodes中的节点就是需要removed的node
 		for _, new := range newMasterNodes {
 			if old.ID == new.ID {
 				isPresent = true
@@ -263,8 +290,9 @@ func (c *Ctx) retrieveSlotToMigrateFromRemovedNodes(newMasterNodes, oldMasterNod
 }
 
 // retrieveLostSlots retrieve the list of slots that are not attributed to a node
+// 找出[0,nbSlots) 之间, 没有任何node负责的slot 有哪些
 func (c *Ctx) retrieveLostSlots(oldMasterNodes redisutil.Nodes, nbSlots int) []redisutil.Slot {
-	currentFullRange := []redisutil.Slot{}
+	currentFullRange := []redisutil.Slot{} //当前master负责的全部slot
 	for _, node := range oldMasterNodes {
 		// TODO a lot of perf improvement can be done here with better algorithm to add slot ranges
 		currentFullRange = append(currentFullRange, node.Slots...)
@@ -291,8 +319,52 @@ func (c *Ctx) retrieveLostSlots(oldMasterNodes redisutil.Nodes, nbSlots int) []r
 	return lostSlots
 }
 
+//buildSlotByNodeFromAvailableSlots
+//params:
+// - newMasterNodes: 缩容后目标节点;
+// - nbSlotByNode: 缩容后每个目标节点 期望有多少 slot;
+// - slotToMigrateByNode: 被缩容掉的node,这些node对应能迁移出的slot详情;
+/*
+缩容计划示例:
+比如当前共有6个master负责 16384 个slot:
+master01 slot: 0-2730      个数: 2731
+master02 slot: 2731-5461   个数: 2731
+master03 slot: 5462-8192   个数: 2731
+master04 slot: 8193-10923  个数: 2731
+master05 slot: 10924-13654 个数: 2731
+master06 slot: 13655-16383 个数: 2729
+
+现在 6 缩 4，缩容后目标节点负责slot数 16384/4=4096 (4096-2731=1375)
+
+
+slotToMigrateBymaster=>{
+  "master05" => [10924..13654],
+  "master06" => [13655..16383]
+}
+
+每个节点需要迁移入这些slot
+slotToAddBymaster => {
+  "master01"=>[10924..12288],
+  "master02"=>[12289..13653],
+  "master03"=>[13654,13655..15018],
+  "master04"=>[15019..16383]
+}
+迁移计划:
+master05 => master01, 迁移slot: 10924..12288
+master05 => master02, 迁移slot: 12289..13653
+master05 => master03, 迁移slot: 13654
+master06 => master04, 迁移slot: 13655..15018
+master06 => master04, 迁移slot: 15019..16383
+
+最终结果:
+"master01" => [0..2730,10924..12288],
+"master02" => [2731..5461,12289..13653],
+"master03" => [5462..8192,13654..15018]
+"master04" => [13655..16383,15019..16383]
+*/
 func (c *Ctx) buildSlotByNodeFromAvailableSlots(newMasterNodes redisutil.Nodes, nbSlotByNode int, slotToMigrateByNode map[string][]redisutil.Slot) map[string][]redisutil.Slot {
 	slotToAddByNode := make(map[string][]redisutil.Slot)
+	slotNodeForLog := make(map[string][]redisutil.Slot)
 	var nbNode = len(newMasterNodes)
 	if nbNode == 0 {
 		return slotToAddByNode
@@ -308,18 +380,61 @@ func (c *Ctx) buildSlotByNodeFromAvailableSlots(newMasterNodes redisutil.Nodes, 
 			if missingSlots > 0 {
 				slotOfNode[idNode] = append(slotOfNode[idNode], slot)
 				slotToAddByNode[newMasterNodes[idNode].ID] = append(slotToAddByNode[newMasterNodes[idNode].ID], slot)
+				slotNodeForLog[newMasterNodes[idNode].PodName] = append(slotNodeForLog[newMasterNodes[idNode].PodName], slot)
 			} else {
 				idNode++
 				if idNode > (nbNode - 1) {
 					// all nodes have been filled
-					idNode--
+					// 所有 缩容后目标节点 都填满了,如果还有slot待迁移,就全部迁移到 '最后一个' node上
+					idNode-- //上面 ++ 这里 --, 意思是继续将slot 放到last node上
 					c.log.V(7).Info(fmt.Sprintf("some available slots have not been assigned, over-filling node %s", newMasterNodes[idNode].ID))
 				}
 				slotOfNode[idNode] = append(slotOfNode[idNode], slot)
 				slotToAddByNode[newMasterNodes[idNode].ID] = append(slotToAddByNode[newMasterNodes[idNode].ID], slot)
+				slotNodeForLog[newMasterNodes[idNode].PodName] = append(slotNodeForLog[newMasterNodes[idNode].PodName], slot)
 			}
 		}
 	}
+	for podName, slots := range slotNodeForLog {
+		log.Info(fmt.Sprintf("buildSlotByNodeFromAvailableSlots podname=>%s balance:%s", podName, ConvertSlotToShellFormat(slots)))
+	}
 
 	return slotToAddByNode
+}
+
+//ConvertSlotToShellFormat 将slots:[0,1,2,3,4,10,11,12,13,17] 按照 {0..4} {10..13} 17 打印
+func ConvertSlotToShellFormat(slots []redisutil.Slot) string {
+	if len(slots) == 0 {
+		return ""
+	}
+	str01 := ""
+	start := slots[0]
+	curr := slots[0]
+	for _, item := range slots {
+		next := item
+		if next == curr {
+			continue
+		}
+		if curr == next-1 {
+			// slot连续,继续
+			curr = next
+			continue
+		}
+		//slot不连续了
+		if start == curr {
+			str01 = fmt.Sprintf("%s %d", str01, start)
+		} else {
+			str01 = fmt.Sprintf("%s {%d..%d}", str01, start, curr)
+		}
+		start = next
+		curr = next
+	}
+	// 最后再处理一次start curr
+	if start == curr {
+		str01 = fmt.Sprintf("%s %d", str01, start)
+	} else {
+		str01 = fmt.Sprintf("%s {%d..%d}", str01, start, curr)
+	}
+	str01 = strings.Trim(str01, " ")
+	return str01
 }

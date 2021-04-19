@@ -32,6 +32,7 @@ func NewPodDisruptionBudgetController(client client.Client) IPodDisruptionBudget
 }
 
 // CreatePodDisruptionBudget implement the IPodDisruptionBudgetControl.Interface.
+// 创建一个PDB
 func (s *PodDisruptionBudgetController) CreatePodDisruptionBudget(pb *policyv1beta1.PodDisruptionBudget) error {
 	return s.client.Create(context.TODO(), pb)
 }
@@ -46,6 +47,7 @@ func (s *PodDisruptionBudgetController) DeletePodDisruptionBudget(pb *policyv1be
 	return s.client.Delete(context.TODO(), pb)
 }
 
+//DeletePodDisruptionBudgetByName 删除PodDisruptionBudget
 func (s *PodDisruptionBudgetController) DeletePodDisruptionBudgetByName(namespace, name string) error {
 	pdb, err := s.GetPodDisruptionBudget(namespace, name)
 	if err != nil {

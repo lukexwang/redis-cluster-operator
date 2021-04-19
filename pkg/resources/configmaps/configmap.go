@@ -19,6 +19,7 @@ const (
 )
 
 // NewConfigMapForCR creates a new ConfigMap for the given Cluster
+// 为给定集群生成一个新的configmap,configmap中包含 shutdown.sh、fix-ip.sh、redis.conf等
 func NewConfigMapForCR(cluster *redisv1alpha1.DistributedRedisCluster, labels map[string]string) *corev1.ConfigMap {
 	// Do CLUSTER FAILOVER when master down
 	shutdownContent := `#!/bin/sh
@@ -57,7 +58,7 @@ if [ -f ${CLUSTER_CONFIG} ]; then
 fi
 exec "$@"`
 
-	redisConfContent := generateRedisConfContent(cluster.Spec.Config)
+	redisConfContent := generateRedisConfContent(cluster.Spec.Config) //cluster.Spec.Config 定义的是redis.conf的内容
 
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -99,10 +100,12 @@ func generateRedisConfContent(configMap map[string]string) string {
 	return buffer.String()
 }
 
+//RedisConfigMapName 集群conifgmap名就是 redis-cluster-${cluster_name}
 func RedisConfigMapName(clusterName string) string {
 	return fmt.Sprintf("%s-%s", "redis-cluster", clusterName)
 }
 
+//NewConfigMapForRestore 为restore创建一个configmap: rediscluster-restore-${clusterName}
 func NewConfigMapForRestore(cluster *redisv1alpha1.DistributedRedisCluster, labels map[string]string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{

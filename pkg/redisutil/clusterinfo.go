@@ -17,7 +17,7 @@ const (
 	ClusterInfosUnset = "Unset"
 	// ClusterInfosPartial status of the cluster info: data is not complete (some nodes didn't respond)
 	ClusterInfosPartial = "Partial"
-	// ClusterInfosInconsistent status of the cluster info: nodesinfos is not consistent between nodes
+	// ClusterInfosInconsistent status of the cluster info: nodesinfos is not consistent between nodes, not consistent是啥意思?
 	ClusterInfosInconsistent = "Inconsistent"
 	// ClusterInfosConsistent status of the cluster info: nodeinfos is complete and consistent between nodes
 	ClusterInfosConsistent = "Consistent"
@@ -140,6 +140,11 @@ func DecodeNodeInfos(input *string, addr string, log logr.Logger) *NodeInfos {
 // the status ClusterInfosPartial is set while building the clusterinfos
 // if already set, do nothing
 // returns true if contistent or if another error
+// 不是很能理解这种检查 集群 连续性的方式:
+// a. consolidatedView:一个Nodes列表, 里面包含了每个node执行'cluster nodes'命令结果myself的那一行.并按照 ID 排序;
+// b. consolidatedSignature: 从consolidatedView中得到slot信息, map[addr]slotSlice
+// c. 每个node执行cluster nodes得到的node信息 也类似上面得到一个 nodeSignature (map[addr]slotSlice)
+// d. 对比 nodeSignature 和 consolidatedSignature,如果不相等 返回 ClusterInfosInconsistent, 如果都相等 返回 ClusterInfosConsistent;
 func (c *ClusterInfos) ComputeStatus(log logr.Logger) bool {
 	if c.Status != ClusterInfosUnset {
 		return false
@@ -147,11 +152,12 @@ func (c *ClusterInfos) ComputeStatus(log logr.Logger) bool {
 
 	consistencyStatus := false
 
-	consolidatedView := c.GetNodes().SortByFunc(LessByID)
+	consolidatedView := c.GetNodes().SortByFunc(LessByID) // Node节点按照ID排序
+	// getConfigSignature 返回一种以集群视角 检查'连续性'(consistency)的方式,返回一个 map[addr]slotSlice(only master)
 	consolidatedSignature := getConfigSignature(consolidatedView)
 	log.V(7).Info("consolidated view", "consolidatedSignature:\n", consolidatedSignature)
 	for addr, nodeinfos := range c.Infos {
-		nodesView := append(nodeinfos.Friends, nodeinfos.Node).SortByFunc(LessByID)
+		nodesView := append(nodeinfos.Friends, nodeinfos.Node).SortByFunc(LessByID) // 这就是在该node视角执行 cluster nodes命令得到的完整nodes信息(myself+friends)
 		nodeSignature := getConfigSignature(nodesView)
 		log.V(7).Info(fmt.Sprintf("node view from %s (ID: %s):\n%s", addr, nodeinfos.Node.ID, nodeSignature))
 		if !reflect.DeepEqual(consolidatedSignature, nodeSignature) {
@@ -170,6 +176,7 @@ func (c *ClusterInfos) ComputeStatus(log logr.Logger) bool {
 // GetNodes returns a nodeSlice view of the cluster
 // the slice if formed from how each node see itself
 // you should check the Status before doing it, to wait for a consistent view
+// 返回一个Nodes列表, 里面包含了每个node执行'cluster nodes'命令结果myself的那一行;
 func (c *ClusterInfos) GetNodes() Nodes {
 	nodes := Nodes{}
 	for _, nodeinfos := range c.Infos {
@@ -196,7 +203,8 @@ func (c ConfigSignature) String() string {
 	return s
 }
 
-// getConfigSignature returns a way to identify a cluster view, to check consistency
+// getConfigSignature returns a way to identify a cluster view, to check consistency 返回一种以集群视角 检查'连续性'(consistency)的方式
+//返回一个 map[addr]slotSlice(only master)
 func getConfigSignature(nodes Nodes) ConfigSignature {
 	signature := ConfigSignature{}
 	for _, node := range nodes {

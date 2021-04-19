@@ -26,10 +26,11 @@ func NewCheck(client client.Client) ICheck {
 	}
 }
 
+//CheckRedisNodeNum 获取每个redis的statefulSet信息,并检查statefulSet对应的pod个数是否符合预期,不符合预期则报错
 func (c *realCheck) CheckRedisNodeNum(cluster *redisv1alpha1.DistributedRedisCluster) error {
 	for i := 0; i < int(cluster.Spec.MasterSize); i++ {
 		name := statefulsets.ClusterStatefulSetName(cluster.Name, i)
-		expectNodeNum := cluster.Spec.ClusterReplicas + 1
+		expectNodeNum := cluster.Spec.ClusterReplicas + 1 //statefulSet中对应的pod个数(master+slave)
 		ss, err := c.statefulSetClient.GetStatefulSet(cluster.Namespace, name)
 		if err != nil {
 			return err
@@ -42,6 +43,7 @@ func (c *realCheck) CheckRedisNodeNum(cluster *redisv1alpha1.DistributedRedisClu
 	return nil
 }
 
+//checkRedisNodeNum 检查statefulSet中pod个数是否符合预期,不符合预期,返回错误
 func (c *realCheck) checkRedisNodeNum(expectNodeNum int32, ss *appsv1.StatefulSet) error {
 	if expectNodeNum != *ss.Spec.Replicas {
 		return fmt.Errorf("number of redis pods is different from specification")

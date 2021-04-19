@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 
 	"github.com/go-logr/logr"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -18,6 +18,7 @@ const (
 	defaultMonitorImage = "oliver006/redis_exporter:latest"
 )
 
+//DefaultSpec 设置cluster.Spec的默认值,比如镜像、masterSize、spec.Monitor等
 func (in *DistributedRedisCluster) DefaultSpec(log logr.Logger) bool {
 	update := false
 	if in.Spec.MasterSize < minMasterSize {
@@ -36,11 +37,11 @@ func (in *DistributedRedisCluster) DefaultSpec(log logr.Logger) bool {
 	}
 
 	if in.Spec.Resources == nil || in.Spec.Resources.Size() == 0 {
-		in.Spec.Resources = defaultResource()
+		in.Spec.Resources = defaultResource() //默认资源配置
 		update = true
 	}
 
-	mon := in.Spec.Monitor
+	mon := in.Spec.Monitor //spec.Monitor 设置一些默认值
 	if mon != nil {
 		if mon.Image == "" {
 			mon.Image = defaultMonitorImage
@@ -67,6 +68,8 @@ func (in *DistributedRedisCluster) DefaultSpec(log logr.Logger) bool {
 	return update
 }
 
+//IsRestoreFromBackup 是否从备份中恢复数据
+//如果集群 spec.init.backupSource 不是 nil,则代表需要从备份中恢复数据
 func (in *DistributedRedisCluster) IsRestoreFromBackup() bool {
 	initSpec := in.Spec.Init
 	if initSpec != nil && initSpec.BackupSource != nil {
@@ -75,22 +78,28 @@ func (in *DistributedRedisCluster) IsRestoreFromBackup() bool {
 	return false
 }
 
+//IsRestored 数据是否已恢复
 func (in *DistributedRedisCluster) IsRestored() bool {
 	return in.Status.Restore.Phase == RestorePhaseSucceeded
 }
 
 func (in *DistributedRedisCluster) ShouldInitRestorePhase() bool {
+	//phase==""代表集群此时没有 正在恢复数据, 所以需要初始化集群的 cluster.status.Restore.Phase
+	//如果正在恢复数据, phase=="running"
 	return in.Status.Restore.Phase == ""
 }
 
+//IsRestoreRunning 集群正在恢复数据
 func (in *DistributedRedisCluster) IsRestoreRunning() bool {
 	return in.Status.Restore.Phase == RestorePhaseRunning
 }
 
+//IsRestoreRestarting 拉取到备份文件了,正在重启master?
 func (in *DistributedRedisCluster) IsRestoreRestarting() bool {
 	return in.Status.Restore.Phase == RestorePhaseRestart
 }
 
+//defaultResource 默认资源规格是 request=>cpu:200m,mem:2Gi; limits=>cpu:1000m,mem:4Gi
 func defaultResource() *v1.ResourceRequirements {
 	return &v1.ResourceRequirements{
 		Requests: v1.ResourceList{
@@ -157,6 +166,7 @@ func (in *RedisClusterBackup) JobName() string {
 	return fmt.Sprintf("redisbackup-%v", in.Name)
 }
 
+//IsRefLocalPVC (备份)是否在localPVC中, backup.Spec.Local != nil && backup.Spec.Local.PersistentVolumeClaim!=nil
 func (in *RedisClusterBackup) IsRefLocalPVC() bool {
 	return in.Spec.Local != nil && in.Spec.Local.PersistentVolumeClaim != nil
 }

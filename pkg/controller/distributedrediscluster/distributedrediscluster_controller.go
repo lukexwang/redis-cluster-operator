@@ -104,7 +104,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	pred := predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			// returns false if DistributedRedisCluster is ignored (not managed) by this operator.
-			if !utils.ShoudManage(e.MetaNew) {
+			if !utils.ShoudManage(e.MetaNew) { //和namespace scoped、cluster scoped有关系
 				return false
 			}
 			log.WithValues("namespace", e.MetaNew.GetNamespace(), "name", e.MetaNew.GetName()).V(5).Info("Call UpdateFunc")
@@ -188,6 +188,10 @@ func (r *ReconcileDistributedRedisCluster) Reconcile(request reconcile.Request) 
 		reqLogger: reqLogger,
 	}
 
+	//- 恢复数据时, 将appendonly 设置为no;
+	//- 如果密码发生改变,则修改redis密码
+	//- (更新/创建) cluster stateFulSet(数据恢复步骤在initContainer中);
+	//- (更新/创建) service,每个stateFulSet一个headless service, cluster有一个ClusterIP类型的service;
 	err = r.ensureCluster(ctx)
 	if err != nil {
 		switch GetType(err) {
@@ -199,7 +203,7 @@ func (r *ReconcileDistributedRedisCluster) Reconcile(request reconcile.Request) 
 		newStatus := instance.Status.DeepCopy()
 		SetClusterScaling(newStatus, err.Error())
 		r.updateClusterIfNeed(instance, newStatus, reqLogger)
-		return reconcile.Result{RequeueAfter: requeueAfter}, nil
+		return reconcile.Result{RequeueAfter: requeueAfter}, nil // 10秒钟后,重新请求该事件
 	}
 
 	matchLabels := getLabels(instance)
@@ -208,6 +212,7 @@ func (r *ReconcileDistributedRedisCluster) Reconcile(request reconcile.Request) 
 		return reconcile.Result{}, Kubernetes.Wrap(err, "GetStatefulSetPods")
 	}
 
+	//ctx.pods 中保存 cluster处于running状态的Pods
 	ctx.pods = clusterPods(redisClusterPods.Items)
 	reqLogger.V(6).Info("debug cluster pods", "", ctx.pods)
 	ctx.healer = clustermanger.NewHealer(&heal.CheckAndHeal{
@@ -216,6 +221,7 @@ func (r *ReconcileDistributedRedisCluster) Reconcile(request reconcile.Request) 
 		Pods:       ctx.pods,
 		DryRun:     false,
 	})
+	//waitPodReady 删除处于terminating状态的pod,并检查每个redis的stateFulSet对应pod数是否符合预期,不符合预期报错
 	err = r.waitPodReady(ctx)
 	if err != nil {
 		switch GetType(err) {
@@ -226,7 +232,7 @@ func (r *ReconcileDistributedRedisCluster) Reconcile(request reconcile.Request) 
 		newStatus := instance.Status.DeepCopy()
 		SetClusterScaling(newStatus, err.Error())
 		r.updateClusterIfNeed(instance, newStatus, reqLogger)
-		return reconcile.Result{RequeueAfter: requeueAfter}, nil
+		return reconcile.Result{RequeueAfter: requeueAfter}, nil // 10秒钟后,重新请求该事件
 	}
 
 	password, err := statefulsets.GetClusterPassword(r.client, instance)
@@ -234,12 +240,15 @@ func (r *ReconcileDistributedRedisCluster) Reconcile(request reconcile.Request) 
 		return reconcile.Result{}, Kubernetes.Wrap(err, "getClusterPassword")
 	}
 
+	//newRedisAdmin 和集群所有nodes都建立连接
 	admin, err := newRedisAdmin(ctx.pods, password, config.RedisConf(), reqLogger)
 	if err != nil {
 		return reconcile.Result{}, Redis.Wrap(err, "newRedisAdmin")
 	}
 	defer admin.Close()
 
+	// - 对每个Node均执行 cluster nodes命令并解析;
+	// - infos.ComputeStatus() 检查集群是否处于 consistent 状态; 不是则返回错误
 	clusterInfos, err := admin.GetClusterInfos()
 	if err != nil {
 		if clusterInfos.Status == redisutil.ClusterInfosPartial {
@@ -247,16 +256,19 @@ func (r *ReconcileDistributedRedisCluster) Reconcile(request reconcile.Request) 
 		}
 	}
 
+	// Heal: 修复:0@0 master,fail,noaddr 这种节点, 修复untrusted的redis node
 	requeue, err := ctx.healer.Heal(instance, clusterInfos, admin)
 	if err != nil {
 		return reconcile.Result{}, Redis.Wrap(err, "Heal")
 	}
 	if requeue {
+		//如果有上面的修复动作,则直接返回
 		return reconcile.Result{RequeueAfter: requeueAfter}, nil
 	}
 
 	ctx.admin = admin
 	ctx.clusterInfos = clusterInfos
+	//waitForClusterJoin 所有节点均和firsetNode执行cluster meet, 然后重新获取所有节点各自的 cluster nodes信息
 	err = r.waitForClusterJoin(ctx)
 	if err != nil {
 		switch GetType(err) {
@@ -311,10 +323,12 @@ func (r *ReconcileDistributedRedisCluster) Reconcile(request reconcile.Request) 
 		return reconcile.Result{}, nil
 	}
 
+	// 更新redis config信息(config get * => config set)
 	if err := admin.SetConfigIfNeed(instance.Spec.Config); err != nil {
 		return reconcile.Result{}, Redis.Wrap(err, "SetConfigIfNeed")
 	}
 
+	//获取cluster.status信息
 	status := buildClusterStatus(clusterInfos, ctx.pods, instance, reqLogger)
 	if is := r.isScalingDown(instance, reqLogger); is {
 		SetClusterRebalancing(status, "scaling down")
@@ -323,8 +337,15 @@ func (r *ReconcileDistributedRedisCluster) Reconcile(request reconcile.Request) 
 	r.updateClusterIfNeed(instance, status, reqLogger)
 
 	instance.Status = *status
+	//needClusterOperation cluster是否需要'操作'
+	//- 如果master个数 与 cluster.spec.masterSize 不相等,则需要'操作',返回true;
+	//- 如果minReplicas 与 cluster.spec.ClusterReplicas 不相等(slave个数少了),则需要'操作',返回true;
+	//- 如果maxReplicas 与 cluster.spec.ClusterReplicas 不相等(slave个数多了),则需要'操作',返回true;
 	if needClusterOperation(instance, reqLogger) {
 		reqLogger.Info(">>>>>> clustering")
+		// - 建立集群关系;
+		// - 完成扩容slot搬迁;
+		// - 完成缩容slot搬迁,stateFulSet删除;
 		err = r.syncCluster(ctx)
 		if err != nil {
 			newStatus := instance.Status.DeepCopy()
@@ -340,6 +361,7 @@ func (r *ReconcileDistributedRedisCluster) Reconcile(request reconcile.Request) 
 			return reconcile.Result{}, Redis.Wrap(err, "GetClusterInfos")
 		}
 	}
+	//更新资源status 信息
 	newStatus := buildClusterStatus(newClusterInfos, ctx.pods, instance, reqLogger)
 	SetClusterOK(newStatus, "OK")
 	r.updateClusterIfNeed(instance, newStatus, reqLogger)

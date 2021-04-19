@@ -10,6 +10,7 @@ import (
 )
 
 // IStatefulSetControl defines the interface that uses to create, update, and delete StatefulSets.
+// IStatefulSetControl StatefulSet控制器的接口,用于创建、更新、删除statefulSet
 type IStatefulSetControl interface {
 	// CreateStatefulSet creates a StatefulSet in a DistributedRedisCluster.
 	CreateStatefulSet(*appsv1.StatefulSet) error

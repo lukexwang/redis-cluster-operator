@@ -2,6 +2,7 @@ package k8sutil
 
 import (
 	"context"
+
 	"k8s.io/apimachinery/pkg/types"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -37,6 +38,7 @@ func (c *clusterControl) UpdateCR(obj runtime.Object) error {
 	return c.client.Update(context.TODO(), obj)
 }
 
+//GetRedisClusterBackup 根据namespace、name获得RedisClusterBackup信息
 func (c *clusterControl) GetRedisClusterBackup(namespace, name string) (*redisv1alpha1.RedisClusterBackup, error) {
 	backup := &redisv1alpha1.RedisClusterBackup{}
 	if err := c.client.Get(context.TODO(), types.NamespacedName{

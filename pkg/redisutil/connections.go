@@ -64,6 +64,7 @@ type IAdminConnections interface {
 
 // AdminConnections connection map for redis cluster
 // currently the admin connection is not threadSafe since it is only use in the Events thread.
+//连接集群中的每一个redis
 type AdminConnections struct {
 	clients           map[string]IClient
 	connectionTimeout time.Duration

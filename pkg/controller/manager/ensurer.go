@@ -17,6 +17,7 @@ import (
 	"github.com/ucloud/redis-cluster-operator/pkg/resources/statefulsets"
 )
 
+//IEnsureResource 确保RedisStatefulSets、HeadLessSvcs、RedisSvc、RedisConfigMap的正常运行
 type IEnsureResource interface {
 	EnsureRedisStatefulsets(cluster *redisv1alpha1.DistributedRedisCluster, labels map[string]string) (bool, error)
 	EnsureRedisHeadLessSvcs(cluster *redisv1alpha1.DistributedRedisCluster, labels map[string]string) error
@@ -51,10 +52,11 @@ func NewEnsureResource(client client.Client, logger logr.Logger) IEnsureResource
 func (r *realEnsureResource) EnsureRedisStatefulsets(cluster *redisv1alpha1.DistributedRedisCluster, labels map[string]string) (bool, error) {
 	updated := false
 	for i := 0; i < int(cluster.Spec.MasterSize); i++ {
-		name := statefulsets.ClusterStatefulSetName(cluster.Name, i)
-		svcName := statefulsets.ClusterHeadlessSvcName(cluster.Spec.ServiceName, i)
+		name := statefulsets.ClusterStatefulSetName(cluster.Name, i)                // such as: drc-example-distributedrediscluster-0
+		svcName := statefulsets.ClusterHeadlessSvcName(cluster.Spec.ServiceName, i) // such as: example-distributedrediscluster-0
 		// assign label
 		labels[redisv1alpha1.StatefulSetLabel] = name
+		//ensureRedisStatefulset 更新或创建stateFulSet
 		if stsUpdated, err := r.ensureRedisStatefulset(cluster, name, svcName, labels); err != nil {
 			return false, err
 		} else if stsUpdated {
@@ -66,15 +68,19 @@ func (r *realEnsureResource) EnsureRedisStatefulsets(cluster *redisv1alpha1.Dist
 
 func (r *realEnsureResource) ensureRedisStatefulset(cluster *redisv1alpha1.DistributedRedisCluster, ssName, svcName string,
 	labels map[string]string) (bool, error) {
+	//确保Cluster定义了 PodDisruptionBudget(如果没有,则创建)
+	//似乎是每个stateFulSet 都对应一个 PDB
 	if err := r.ensureRedisPDB(cluster, ssName, labels); err != nil {
 		return false, err
 	}
 
 	ss, err := r.statefulSetClient.GetStatefulSet(cluster.Namespace, ssName)
 	if err == nil {
+		//是否应该更新redis stateFulSet, 如镜像、replica、密码、request.Memory、request.CPU等如果发生了改变,就需要更新
 		if shouldUpdateRedis(cluster, ss) {
 			r.logger.WithValues("StatefulSet.Namespace", cluster.Namespace, "StatefulSet.Name", ssName).
 				Info("updating statefulSet")
+			//生成stateFulSet的定义,然后走update逻辑
 			newSS, err := statefulsets.NewStatefulSetForCR(cluster, ssName, svcName, labels)
 			if err != nil {
 				return false, err
@@ -84,6 +90,7 @@ func (r *realEnsureResource) ensureRedisStatefulset(cluster *redisv1alpha1.Distr
 	} else if err != nil && errors.IsNotFound(err) {
 		r.logger.WithValues("StatefulSet.Namespace", cluster.Namespace, "StatefulSet.Name", ssName).
 			Info("creating a new statefulSet")
+		//生成stateFulSet的定义,然后走create逻辑
 		newSS, err := statefulsets.NewStatefulSetForCR(cluster, ssName, svcName, labels)
 		if err != nil {
 			return false, err
@@ -93,8 +100,10 @@ func (r *realEnsureResource) ensureRedisStatefulset(cluster *redisv1alpha1.Distr
 	return false, err
 }
 
+//shouldUpdateRedis 是否应该更新redis stateFulSet, 如镜像、replica、密码、request.Memory、request.CPU等如果发生了改变,就需要更新
 func shouldUpdateRedis(cluster *redisv1alpha1.DistributedRedisCluster, sts *appsv1.StatefulSet) bool {
 	if (cluster.Spec.ClusterReplicas + 1) != *sts.Spec.Replicas {
+		//ClusterReplicas 是slave的个数,所以 stateFulSet.Spec.Replicas 必须等于 cluster.Spec.ClusterReplicas + 1
 		return true
 	}
 	if cluster.Spec.Image != sts.Spec.Template.Spec.Containers[0].Image {
@@ -140,6 +149,7 @@ func monitorChanged(cluster *redisv1alpha1.DistributedRedisCluster, sts *appsv1.
 	}
 }
 
+//ensureRedisPDB 确保Cluster定义了 PodDisruptionBudget(如果没有,则创建)
 func (r *realEnsureResource) ensureRedisPDB(cluster *redisv1alpha1.DistributedRedisCluster, name string, labels map[string]string) error {
 	_, err := r.pdbClient.GetPodDisruptionBudget(cluster.Namespace, name)
 	if err != nil && errors.IsNotFound(err) {
@@ -153,7 +163,9 @@ func (r *realEnsureResource) ensureRedisPDB(cluster *redisv1alpha1.DistributedRe
 
 func (r *realEnsureResource) EnsureRedisHeadLessSvcs(cluster *redisv1alpha1.DistributedRedisCluster, labels map[string]string) error {
 	for i := 0; i < int(cluster.Spec.MasterSize); i++ {
+		// 集群每个stateFulSet都对应一个headlessSvc,名称:${serviceName}-${N}
 		svcName := statefulsets.ClusterHeadlessSvcName(cluster.Spec.ServiceName, i)
+		// 集群statefulSet设置名字: drc-${cluster_name}-${N}
 		name := statefulsets.ClusterStatefulSetName(cluster.Name, i)
 		// assign label
 		labels[redisv1alpha1.StatefulSetLabel] = name
@@ -175,6 +187,7 @@ func (r *realEnsureResource) ensureRedisHeadLessSvc(cluster *redisv1alpha1.Distr
 	return err
 }
 
+//EnsureRedisSvc 每个RedisCluster都有一个ClusterIP类型的service
 func (r *realEnsureResource) EnsureRedisSvc(cluster *redisv1alpha1.DistributedRedisCluster, labels map[string]string) error {
 	name := cluster.Spec.ServiceName
 	delete(labels, redisv1alpha1.StatefulSetLabel)
@@ -182,12 +195,16 @@ func (r *realEnsureResource) EnsureRedisSvc(cluster *redisv1alpha1.DistributedRe
 	if err != nil && errors.IsNotFound(err) {
 		r.logger.WithValues("Service.Namespace", cluster.Namespace, "Service.Name", cluster.Spec.ServiceName).
 			Info("creating a new service")
+		//NewSvcForCR 关于cluster的service, 使用默认的 ClusterIP类型,svcNmae名字:{clusterName}
 		svc := services.NewSvcForCR(cluster, name, labels)
 		return r.svcClient.CreateService(svc)
 	}
 	return err
 }
 
+// EnsureRedisConfigMap 确认configmap的内容
+// - 为redis-cluster生成一个新的configmap: redis-cluster-${cluster_name},configmap中包含 shutdown.sh、fix-ip.sh、redis.conf等
+// - 如果集群需要从备份中恢复数据,则为resotre生成configmap, 名字: rediscluster-restore-${clusterName}
 func (r *realEnsureResource) EnsureRedisConfigMap(cluster *redisv1alpha1.DistributedRedisCluster, labels map[string]string) error {
 	cmName := configmaps.RedisConfigMapName(cluster.Name)
 	drcCm, err := r.configMapClient.GetConfigMap(cluster.Namespace, cmName)
@@ -195,14 +212,15 @@ func (r *realEnsureResource) EnsureRedisConfigMap(cluster *redisv1alpha1.Distrib
 		if errors.IsNotFound(err) {
 			r.logger.WithValues("ConfigMap.Namespace", cluster.Namespace, "ConfigMap.Name", cmName).
 				Info("creating a new configMap")
-			cm := configmaps.NewConfigMapForCR(cluster, labels)
-			if err2 := r.configMapClient.CreateConfigMap(cm); err2 != nil {
+			cm := configmaps.NewConfigMapForCR(cluster, labels)             //为集群生成一个新的configmap,configmap中包含 shutdown.sh、fix-ip.sh、redis.conf等
+			if err2 := r.configMapClient.CreateConfigMap(cm); err2 != nil { //创建configmap
 				return err2
 			}
 		} else {
 			return err
 		}
 	} else {
+		//如果redis.conf内容发生了改变,则更新 configmap的内容
 		if isRedisConfChanged(drcCm.Data[configmaps.RedisConfKey], cluster.Spec.Config, r.logger) {
 			cm := configmaps.NewConfigMapForCR(cluster, labels)
 			if err2 := r.configMapClient.UpdateConfigMap(cm); err2 != nil {
@@ -212,6 +230,7 @@ func (r *realEnsureResource) EnsureRedisConfigMap(cluster *redisv1alpha1.Distrib
 	}
 
 	if cluster.IsRestoreFromBackup() {
+		//如果需要从备份中恢复数据,则为restore生成configmap
 		restoreCmName := configmaps.RestoreConfigMapName(cluster.Name)
 		restoreCm, err := r.configMapClient.GetConfigMap(cluster.Namespace, restoreCmName)
 		if err != nil {

@@ -21,6 +21,7 @@ var (
 	}
 )
 
+//getLabels 将labels合并然后返回
 func getLabels(cluster *redisv1alpha1.DistributedRedisCluster) map[string]string {
 	dynLabels := map[string]string{
 		redisv1alpha1.LabelClusterName: cluster.Name,
@@ -29,6 +30,7 @@ func getLabels(cluster *redisv1alpha1.DistributedRedisCluster) map[string]string
 }
 
 // newRedisAdmin builds and returns new redis.Admin from the list of pods
+// 返回值中包含 集群中每一个redis pods的连接
 func newRedisAdmin(pods []*corev1.Pod, password string, cfg *config.Redis, reqLogger logr.Logger) (redisutil.IAdmin, error) {
 	nodesAddrs := []string{}
 	for _, pod := range pods {
@@ -54,6 +56,7 @@ func newRedisAdmin(pods []*corev1.Pod, password string, cfg *config.Redis, reqLo
 	return redisutil.NewAdmin(nodesAddrs, &adminConfig, reqLogger), nil
 }
 
+//newRedisCluster 获取集群所有信息,报错 clusterName、nameSpace、nodes等信息,nodes中包含了每个node的ID、IP、Port、slot等信息
 func newRedisCluster(infos *redisutil.ClusterInfos, cluster *redisv1alpha1.DistributedRedisCluster) (*redisutil.Cluster, redisutil.Nodes, error) {
 	// now we can trigger the rebalance
 	nodes := infos.GetNodes()
@@ -92,6 +95,10 @@ func clusterPods(pods []corev1.Pod) []*corev1.Pod {
 	return podSlice
 }
 
+//needClusterOperation cluster是否需要'操作'
+//- 如果master个数 与 cluster.spec.masterSize 不相等,则需要'操作',返回true;
+//- 如果minReplicas 与 cluster.spec.ClusterReplicas 不相等(slave个数少了),则需要'操作',返回true;
+//- 如果maxReplicas 与 cluster.spec.ClusterReplicas 不相等(slave个数多了),则需要'操作',返回true;
 func needClusterOperation(cluster *redisv1alpha1.DistributedRedisCluster, reqLogger logr.Logger) bool {
 	if utils.CompareIntValue("NumberOfMaster", &cluster.Status.NumberOfMaster, &cluster.Spec.MasterSize, reqLogger) {
 		reqLogger.V(4).Info("needClusterOperation---NumberOfMaster")
@@ -197,6 +204,7 @@ func (w *waitStatefulSetUpdating) Timeout() time.Duration {
 	return w.timeout
 }
 
+//确保cluster的每个stateFulSet, stateFulSet.Status.ReadyReplicas == cluster.Spec.ClusterReplicas+1
 func (w *waitStatefulSetUpdating) Handler() error {
 	labels := getLabels(w.cluster)
 	stsList, err := w.statefulSetController.ListStatefulSetByLabels(w.cluster.Namespace, labels)

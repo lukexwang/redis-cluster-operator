@@ -16,13 +16,13 @@ spec:
       containers:
         - name: redis-cluster-operator
           # Replace this with the built image name
-          image: fishu/redis-cluster-operator:latest
+          image: ccr.ccs.tencentyun.com/lukexwang/redis-cluster-operator:latest
           command:
           - redis-cluster-operator
           args:
           - --rename-command-path=/etc/redisconf
           - --rename-command-file=redis.conf
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           env:
             - name: WATCH_NAMESPACE
               value: ""

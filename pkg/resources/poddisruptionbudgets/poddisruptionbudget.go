@@ -8,6 +8,7 @@ import (
 	redisv1alpha1 "github.com/ucloud/redis-cluster-operator/pkg/apis/redis/v1alpha1"
 )
 
+// NewPodDisruptionBudgetForCR 生成一个PDB的定义,返回
 func NewPodDisruptionBudgetForCR(cluster *redisv1alpha1.DistributedRedisCluster, name string, labels map[string]string) *policyv1beta1.PodDisruptionBudget {
 	maxUnavailable := intstr.FromInt(1)
 

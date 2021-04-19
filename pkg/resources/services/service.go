@@ -28,6 +28,7 @@ func NewHeadLessSvcForCR(cluster *redisv1alpha1.DistributedRedisCluster, name st
 	return svc
 }
 
+//NewSvcForCR 关于cluster的service, 使用默认的 ClusterIP类型,svcNmae名字:{clusterName}
 func NewSvcForCR(cluster *redisv1alpha1.DistributedRedisCluster, name string, labels map[string]string) *corev1.Service {
 	var ports []corev1.ServicePort
 	clientPort := corev1.ServicePort{Name: "client", Port: 6379}

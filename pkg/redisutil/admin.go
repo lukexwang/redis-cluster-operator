@@ -117,12 +117,14 @@ func (a *Admin) Close() {
 }
 
 // GetClusterInfos return the Nodes infos for all nodes
+// - 对每个Node均执行 cluster nodes命令并解析;
+// - infos.ComputeStatus() 检查集群是否处于 consistent 状态; 不是则返回错误;
 func (a *Admin) GetClusterInfos() (*ClusterInfos, error) {
 	infos := NewClusterInfos()
 	clusterErr := NewClusterInfosError()
 
 	for addr, c := range a.Connections().GetAll() {
-		nodeinfos, err := a.getInfos(c, addr)
+		nodeinfos, err := a.getInfos(c, addr) // 执行cluster nodes命令,并解析结果
 		if err != nil {
 			a.log.WithValues("err", err).Info("get redis info failed")
 			infos.Status = ClusterInfosPartial
@@ -202,6 +204,8 @@ func (a *Admin) clusterKnowNodes(c IClient, addr string) (int, error) {
 }
 
 // AttachSlaveToMaster attach a slave to a master node
+//- slave执行cluster replicate $masterID
+//- slave设置自己的MasterReferent=masterID, slave.Role=slave;
 func (a *Admin) AttachSlaveToMaster(slave *Node, masterID string) error {
 	c, err := a.Connections().Get(slave.IPPort())
 	if err != nil {
@@ -290,6 +294,7 @@ func (a *Admin) SetConfigEpoch() error {
 }
 
 // AttachNodeToCluster command use to connect a Node to the cluster
+// 集群所有其他node都cluster meet addr, 同时更新Admin.Connections()中 addr的connection
 func (a *Admin) AttachNodeToCluster(addr string) error {
 	ip, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -318,6 +323,7 @@ func (a *Admin) AttachNodeToCluster(addr string) error {
 }
 
 // GetAllConfig get redis config by CONFIG GET *
+//通过执行 CONFIG GET * 获取所有配置信息
 func (a *Admin) GetAllConfig(c IClient, addr string) (map[string]string, error) {
 	resp := c.Cmd("CONFIG", "GET", "*")
 	if err := a.Connections().ValidateResp(resp, addr, "unable to retrieve config"); err != nil {
@@ -354,6 +360,7 @@ var parseConfigMap = map[string]int8{
 }
 
 // SetConfigIfNeed set redis config
+// 更新redis config信息(config get * => config set)
 func (a *Admin) SetConfigIfNeed(newConfig map[string]string) error {
 	for addr, c := range a.Connections().GetAll() {
 		oldConfig, err := a.GetAllConfig(c, addr)
@@ -432,6 +439,7 @@ func (a *Admin) MigrateKeys(addr string, dest *Node, slots []Slot, batch int, ti
 
 // MigrateKeys use to migrate keys from slot to other slot. if replace is true, replace key on busy error
 // timeout is in milliseconds
+// 一批一批开始迁移slot中的key, 一批迁移batch个key
 func (a *Admin) MigrateKeysInSlot(addr string, dest *Node, slot Slot, batch int, timeout int, replace bool) (int, error) {
 	keyCount := 0
 	c, err := a.Connections().Get(addr)
